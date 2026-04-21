@@ -1,5 +1,6 @@
 """
 OCR extraction via Mistral OCR + chat structuration.
+Gère : 1 PDF multi-pages (1 page = 1 questionnaire) ou N PDFs de 1 page.
 """
 
 import base64
@@ -9,22 +10,36 @@ import os
 from mistralai.client import Mistral
 
 
-STRUCTURATION_PROMPT = """Voici le contenu OCR d'un questionnaire de satisfaction. Les cases cochées sont indiquées par des symboles comme ☑, ☒, ✗, X, x, ou [x].
+STRUCTURATION_PROMPT = """Voici le contenu OCR d'UN questionnaire de satisfaction rempli par UN participant.
+Les cases cochées sont indiquées par ☑ ou ☒. Les cases vides sont vides ou ☐.
 
-Extrais toutes les réponses et retourne UNIQUEMENT un JSON valide (sans markdown) dans ce format :
+Extrais toutes les données et retourne UNIQUEMENT un JSON valide (sans markdown) dans ce format :
 {
-  "title": "Questionnaire de satisfaction",
-  "categories": [
+  "metadata": {
+    "participant": "Nom Prénom du participant",
+    "formation": "Nom de la formation",
+    "lieu": "Lieu / établissement",
+    "formateur": "Nom du formateur",
+    "date": "Date du bilan"
+  },
+  "response_levels": ["Très satisfait", "Satisfait", "Déçu", "Très déçu"],
+  "items": [
     {
-      "name": "Nom de la catégorie",
-      "items": [
-        {"label": "Libellé de l'item", "response": "Tout à fait satisfait"}
-      ]
+      "number": 1,
+      "label": "Libellé de la question",
+      "response": "Très satisfait",
+      "comment": "Commentaire du participant ou null"
     }
-  ]
+  ],
+  "remarks": "Remarques et suggestions libres en fin de questionnaire ou null",
+  "wishes": "Souhaits pour d'autres formations ou null"
 }
 
-Les réponses possibles sont exactement : "Tout à fait satisfait", "Satisfait", "Peu satisfait", "Pas du tout satisfait", "Non renseigné".
+IMPORTANT :
+- "response_levels" doit contenir les niveaux exacts tels qu'écrits dans l'en-tête du tableau (du plus positif au plus négatif)
+- "response" doit être exactement l'un de ces niveaux
+- Si aucune case n'est cochée, "response" = "Non renseigné"
+- "comment" = null si pas de commentaire pour cet item
 
 Contenu OCR :
 """
@@ -37,12 +52,10 @@ def get_client():
     return Mistral(api_key=api_key)
 
 
-def extract_from_pdf(pdf_bytes: bytes) -> dict:
-    """Extrait les données d'un questionnaire PDF via Mistral OCR + chat."""
-    client = get_client()
+def _ocr_pdf(client, pdf_bytes: bytes) -> list[str]:
+    """OCR un PDF et retourne le markdown de chaque page."""
     data_b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
 
-    # Étape 1 : OCR dédié
     ocr_result = client.ocr.process(
         model="mistral-ocr-latest",
         document={
@@ -51,9 +64,11 @@ def extract_from_pdf(pdf_bytes: bytes) -> dict:
         },
     )
 
-    markdown = "\n\n".join(page.markdown for page in ocr_result.pages)
+    return [page.markdown for page in ocr_result.pages]
 
-    # Étape 2 : Structuration via chat
+
+def _structure_page(client, markdown: str) -> dict:
+    """Structuration d'une page de questionnaire via chat."""
     response = client.chat.complete(
         model="mistral-small-latest",
         messages=[
@@ -66,3 +81,21 @@ def extract_from_pdf(pdf_bytes: bytes) -> dict:
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
     return json.loads(raw)
+
+
+def extract_from_pdf(pdf_bytes: bytes) -> list[dict]:
+    """
+    Extrait les données de tous les questionnaires d'un PDF.
+    Retourne une liste de questionnaires (1 par page).
+    """
+    client = get_client()
+    pages_md = _ocr_pdf(client, pdf_bytes)
+
+    questionnaires = []
+    for md in pages_md:
+        if len(md.strip()) < 50:
+            continue
+        data = _structure_page(client, md)
+        questionnaires.append(data)
+
+    return questionnaires
