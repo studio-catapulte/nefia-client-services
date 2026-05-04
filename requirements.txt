@@ -4,3 +4,5 @@ mistralai
 python-pptx
 Pillow
 python-multipart
+slowapi
+structlog

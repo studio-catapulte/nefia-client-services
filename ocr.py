@@ -49,7 +49,8 @@ def get_client():
     api_key = os.environ.get("MISTRAL_API_KEY")
     if not api_key:
         raise RuntimeError("MISTRAL_API_KEY non définie")
-    return Mistral(api_key=api_key)
+    timeout_ms = int(os.environ.get("MISTRAL_TIMEOUT_MS", "120000"))
+    return Mistral(api_key=api_key, timeout_ms=timeout_ms)
 
 
 def _ocr_pdf(client, pdf_bytes: bytes) -> list[str]:
