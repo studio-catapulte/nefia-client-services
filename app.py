@@ -1,9 +1,14 @@
 """
 API questionnaire de satisfaction : PDFs → OCR → PPTX + CSV + JSON.
 Gère : N PDFs de 1 page, ou 1 PDF multi-pages, ou un mix.
+
+Deux entrées :
+- POST /process     : multipart-form-data (legacy, fichiers binaires)
+- POST /process_json: application/json (files: [{name, base64}], title)
 """
 
 import base64
+import binascii
 import csv
 import io
 import os
@@ -21,6 +26,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -43,7 +49,7 @@ logger = get_logger()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
-app = FastAPI(title="Nefia Questionnaire Processor", version="2.1.0")
+app = FastAPI(title="Nefia Questionnaire Processor", version="2.2.0")
 app.state.limiter = limiter
 
 
@@ -117,77 +123,74 @@ async def health():
     )
 
 
-def _validate_file(file: UploadFile) -> None:
+def _validate_extension(filename: str) -> None:
+    if not filename:
+        return
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported extension for {filename!r}",
+        )
+
+
+def _validate_upload_file(file: UploadFile) -> None:
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"Unsupported content-type for {file.filename!r}: {file.content_type}",
         )
-    if file.filename:
-        ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail=f"Unsupported extension for {file.filename!r}",
-            )
+    _validate_extension(file.filename or "")
 
 
-@app.post("/process", dependencies=[Depends(require_api_key)])
-@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
-async def process_questionnaires(
-    request: Request,
-    files: list[UploadFile] = File(..., description="PDF questionnaires scannes"),
-    title: Optional[str] = Form("Resultats de satisfaction"),
-):
-    """
-    Recoit N PDFs (chacun pouvant contenir plusieurs pages/questionnaires).
-    OCR chaque page, agrege, retourne PPTX + CSV + JSON en base64.
-    """
-    if len(files) > MAX_FILES_PER_REQUEST:
+def _process_files(
+    pdfs: list[tuple[str, bytes]],
+    title: str,
+    request_id: str,
+) -> dict:
+    """Pipeline OCR → PPTX + CSV. Reçoit une liste (filename, bytes)."""
+    if len(pdfs) > MAX_FILES_PER_REQUEST:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Too many files: {len(files)} > {MAX_FILES_PER_REQUEST}",
+            detail=f"Too many files: {len(pdfs)} > {MAX_FILES_PER_REQUEST}",
         )
 
     max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-    all_questionnaires = []
-    errors = []
+    all_questionnaires: list[dict] = []
+    errors: list[dict] = []
 
-    logger.info("process_started", file_count=len(files), title=title)
+    logger.info("process_started", file_count=len(pdfs), title=title)
 
-    for file in files:
+    for filename, pdf_bytes in pdfs:
         try:
-            _validate_file(file)
-            pdf_bytes = await file.read()
+            _validate_extension(filename)
             if len(pdf_bytes) > max_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File {file.filename!r} too large ({len(pdf_bytes)} bytes > {max_bytes})",
+                    detail=f"File {filename!r} too large ({len(pdf_bytes)} bytes > {max_bytes})",
                 )
             questionnaires = extract_from_pdf(pdf_bytes)
             all_questionnaires.extend(questionnaires)
             logger.info(
                 "file_processed",
-                filename=file.filename,
+                filename=filename,
                 size_bytes=len(pdf_bytes),
                 questionnaires_extracted=len(questionnaires),
             )
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("file_processing_failed", filename=file.filename)
-            errors.append({"file": file.filename, "error": str(e)})
+            logger.exception("file_processing_failed", filename=filename)
+            errors.append({"file": filename, "error": str(e)})
 
     if not all_questionnaires:
         logger.warning("no_questionnaires_extracted", errors=errors)
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "Aucun questionnaire extrait",
-                "details": errors,
-                "request_id": request.state.request_id,
-            },
-        )
+        return {
+            "_status_code": 400,
+            "error": "Aucun questionnaire extrait",
+            "details": errors,
+            "request_id": request_id,
+        }
 
     pptx_bytes = generate_pptx(all_questionnaires, title)
 
@@ -218,5 +221,65 @@ async def process_questionnaires(
         "pptx_base64": base64.b64encode(pptx_bytes).decode(),
         "csv_base64": base64.b64encode(csv_bytes).decode(),
         "data": all_questionnaires,
-        "request_id": request.state.request_id,
+        "request_id": request_id,
     }
+
+
+@app.post("/process", dependencies=[Depends(require_api_key)])
+@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
+async def process_questionnaires(
+    request: Request,
+    files: list[UploadFile] = File(..., description="PDF questionnaires scannes"),
+    title: Optional[str] = Form("Resultats de satisfaction"),
+):
+    """
+    Multipart-form-data : N PDFs en binaires + title.
+    """
+    pdfs: list[tuple[str, bytes]] = []
+    for f in files:
+        _validate_upload_file(f)
+        pdfs.append((f.filename or "questionnaire.pdf", await f.read()))
+
+    result = _process_files(pdfs, title or "Resultats de satisfaction", request.state.request_id)
+    if result.get("_status_code"):
+        sc = result.pop("_status_code")
+        return JSONResponse(status_code=sc, content=result)
+    return result
+
+
+class _JsonFile(BaseModel):
+    name: str = Field(..., description="Nom du fichier (avec extension .pdf)")
+    base64: str = Field(..., description="Contenu binaire encodé base64")
+
+
+class _JsonProcessRequest(BaseModel):
+    title: str = Field(default="Resultats de satisfaction")
+    files: list[_JsonFile] = Field(..., min_length=1)
+
+
+@app.post("/process_json", dependencies=[Depends(require_api_key)])
+@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
+async def process_questionnaires_json(
+    request: Request,
+    payload: _JsonProcessRequest,
+):
+    """
+    Application/json : { title, files: [{name, base64}] }.
+    Mêmes contraintes (taille, extension, rate limit) que /process.
+    """
+    pdfs: list[tuple[str, bytes]] = []
+    for jf in payload.files:
+        try:
+            pdf_bytes = base64.b64decode(jf.base64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid base64 for file {jf.name!r}: {e}",
+            )
+        pdfs.append((jf.name, pdf_bytes))
+
+    result = _process_files(pdfs, payload.title, request.state.request_id)
+    if result.get("_status_code"):
+        sc = result.pop("_status_code")
+        return JSONResponse(status_code=sc, content=result)
+    return result
