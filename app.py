@@ -372,20 +372,15 @@ def _build_raw_data(aggregates: dict) -> dict:
     }
 
 
-@app.post("/inject_slides", dependencies=[Depends(require_api_key)])
-@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
-async def inject_slides_endpoint(
-    request: Request,
-    pptx_input: UploadFile = File(..., description="PPTX formateur (déjà rempli)"),
-    scans_pdf: list[UploadFile] = File(..., description="Scans PDF des questionnaires"),
-    session_id: str = Form(..., description="Identifiant de session (slug humain)"),
-    client: str = Form(..., description="Nom du client / structure"),
-    titre: str = Form(..., description="Titre de la formation"),
-):
-    """v3 Pic-Formation : injection bloc analyse + closing commercial dans le PPTX formateur."""
-    rid = request.state.request_id
-
-    # --- Validations ---
+def _run_inject_pipeline(
+    pptx_bytes: bytes,
+    pdf_files: list[tuple[str, bytes]],
+    session_id: str,
+    client: str,
+    titre: str,
+    request_id: str,
+) -> dict:
+    """Pipeline OCR → aggregate → inject. Partagé entre /inject_slides et /inject_slides_json."""
     if not ANALYSIS_TEMPLATE.exists() or not CLOSING_TEMPLATE.exists():
         logger.error(
             "templates_missing",
@@ -397,35 +392,6 @@ async def inject_slides_endpoint(
             detail="Server misconfiguration: templates missing",
         )
 
-    _validate_pptx_upload(pptx_input)
-    if len(scans_pdf) > MAX_FILES_PER_REQUEST:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Too many files: {len(scans_pdf)} > {MAX_FILES_PER_REQUEST}",
-        )
-    for f in scans_pdf:
-        _validate_upload_file(f)
-
-    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-
-    # --- Read everything into memory + persist on disk for path-based libs ---
-    pptx_bytes = await pptx_input.read()
-    if len(pptx_bytes) > max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"PPTX input too large ({len(pptx_bytes)} > {max_bytes})",
-        )
-
-    pdf_files: list[tuple[str, bytes]] = []
-    for f in scans_pdf:
-        b = await f.read()
-        if len(b) > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File {f.filename!r} too large ({len(b)} > {max_bytes})",
-            )
-        pdf_files.append((f.filename or "questionnaire.pdf", b))
-
     logger.info(
         "inject_slides_started",
         session_id=session_id,
@@ -435,14 +401,11 @@ async def inject_slides_endpoint(
         pptx_size=len(pptx_bytes),
     )
 
-    # --- Pipeline ---
     with tempfile.TemporaryDirectory(prefix="inject_") as tmpdir:
         tmpdir_path = Path(tmpdir)
-        # 1. Persist PPTX input
         pptx_input_path = tmpdir_path / "formateur.pptx"
         pptx_input_path.write_bytes(pptx_bytes)
 
-        # 2. OCR each PDF
         all_participants: list[dict] = []
         ocr_errors: list[dict] = []
         for fname, pdf_bytes in pdf_files:
@@ -463,19 +426,15 @@ async def inject_slides_endpoint(
 
         if not all_participants:
             logger.warning("no_questionnaires_extracted", errors=ocr_errors)
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "error": "Aucun questionnaire extrait",
-                    "details": ocr_errors,
-                    "request_id": rid,
-                },
-            )
+            return {
+                "_status_code": status.HTTP_400_BAD_REQUEST,
+                "error": "Aucun questionnaire extrait",
+                "details": ocr_errors,
+                "request_id": request_id,
+            }
 
-        # 3. Aggregate
         aggregates = aggregate_participants({"participants": all_participants})
 
-        # 4. Inject
         out_path = tmpdir_path / "out.pptx"
         try:
             inject_pic_analysis(
@@ -514,5 +473,124 @@ async def inject_slides_endpoint(
         "pptx_base64": base64.b64encode(out_pptx_bytes).decode(),
         "csv_base64": base64.b64encode(csv_bytes).decode(),
         "raw_data": _build_raw_data(aggregates),
-        "request_id": rid,
+        "request_id": request_id,
     }
+
+
+@app.post("/inject_slides", dependencies=[Depends(require_api_key)])
+@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
+async def inject_slides_endpoint(
+    request: Request,
+    pptx_input: UploadFile = File(..., description="PPTX formateur (déjà rempli)"),
+    scans_pdf: list[UploadFile] = File(..., description="Scans PDF des questionnaires"),
+    session_id: str = Form(..., description="Identifiant de session (slug humain)"),
+    client: str = Form(..., description="Nom du client / structure"),
+    titre: str = Form(..., description="Titre de la formation"),
+):
+    """v3 Pic-Formation (multipart) : injection bloc analyse + closing commercial dans le PPTX formateur."""
+    _validate_pptx_upload(pptx_input)
+    if len(scans_pdf) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Too many files: {len(scans_pdf)} > {MAX_FILES_PER_REQUEST}",
+        )
+    for f in scans_pdf:
+        _validate_upload_file(f)
+
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    pptx_bytes = await pptx_input.read()
+    if len(pptx_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"PPTX input too large ({len(pptx_bytes)} > {max_bytes})",
+        )
+
+    pdf_files: list[tuple[str, bytes]] = []
+    for f in scans_pdf:
+        b = await f.read()
+        if len(b) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File {f.filename!r} too large ({len(b)} > {max_bytes})",
+            )
+        pdf_files.append((f.filename or "questionnaire.pdf", b))
+
+    result = _run_inject_pipeline(
+        pptx_bytes, pdf_files, session_id, client, titre, request.state.request_id
+    )
+    if result.get("_status_code"):
+        sc = result.pop("_status_code")
+        return JSONResponse(status_code=sc, content=result)
+    return result
+
+
+class _InjectJsonRequest(BaseModel):
+    session_id: str = Field(..., description="Identifiant de session (slug humain)")
+    client: str = Field(..., description="Nom du client / structure")
+    titre: str = Field(..., description="Titre de la formation")
+    pptx_input_base64: str = Field(..., description="PPTX formateur (base64)")
+    scans_pdf: list[_JsonFile] = Field(..., min_length=1)
+
+
+@app.post("/inject_slides_json", dependencies=[Depends(require_api_key)])
+@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
+async def inject_slides_json_endpoint(
+    request: Request,
+    payload: _InjectJsonRequest,
+):
+    """v3 Pic-Formation (JSON+base64) : variante consommée par n8n.
+
+    Évite le multipart depuis n8n (fragile avec arrays de binaries) et le
+    sandbox du Code node 2.19+ qui interdit require('form-data') et
+    httpRequestWithAuthentication.
+    """
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+
+    try:
+        pptx_bytes = base64.b64decode(payload.pptx_input_base64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid base64 for pptx_input: {e}",
+        )
+    if len(pptx_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"PPTX input too large ({len(pptx_bytes)} > {max_bytes})",
+        )
+
+    if len(payload.scans_pdf) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Too many files: {len(payload.scans_pdf)} > {MAX_FILES_PER_REQUEST}",
+        )
+
+    pdf_files: list[tuple[str, bytes]] = []
+    for jf in payload.scans_pdf:
+        try:
+            pdf_bytes = base64.b64decode(jf.base64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid base64 for file {jf.name!r}: {e}",
+            )
+        _validate_extension(jf.name)
+        if len(pdf_bytes) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File {jf.name!r} too large ({len(pdf_bytes)} > {max_bytes})",
+            )
+        pdf_files.append((jf.name, pdf_bytes))
+
+    result = _run_inject_pipeline(
+        pptx_bytes,
+        pdf_files,
+        payload.session_id,
+        payload.client,
+        payload.titre,
+        request.state.request_id,
+    )
+    if result.get("_status_code"):
+        sc = result.pop("_status_code")
+        return JSONResponse(status_code=sc, content=result)
+    return result
