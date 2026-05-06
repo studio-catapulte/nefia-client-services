@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 from lxml import etree
 from pptx import Presentation
+from pptx.dml.color import RGBColor
 from pptx.opc.package import Part
 from pptx.presentation import Presentation as PresentationType
 from pptx.slide import Slide
@@ -102,7 +103,14 @@ def _ensure_pt(cache, idx: int, value: str):
 
 
 def _update_pie3d_chart(chart_shape, counts: dict[str, int]):
-    """Force les 4 valeurs du chart 3D pie d'une slide question."""
+    """Force les 4 valeurs du chart 3D pie d'une slide question.
+
+    Pour les catégories à 0, on supprime à la fois le `<c:dPt>` (override couleur)
+    ET le `<c:dLbl>` (override label) correspondants. Sinon PowerPoint rend des
+    artefacts (slice 0 colorée, label "0 (0 %)" planant à côté du camembert) —
+    visible quand 100 % des participants ont coché la même case (cas Q10
+    "Très satisfait" 8/0/0/0 sur MALECOT).
+    """
     chart = chart_shape.chart
     cs = chart._chartSpace
     series = cs.find(".//c:pie3DChart/c:ser", NS)
@@ -129,9 +137,95 @@ def _update_pie3d_chart(chart_shape, counts: dict[str, int]):
         for idx, cat in enumerate(CHART_CATEGORIES):
             _ensure_pt(str_cache, idx, cat)
 
+    # Supprimer dPt + dLbl pour les catégories à 0 (évite slice fantôme et label "0 (0 %)")
+    values_by_idx = {idx: counts.get(cat, 0) for idx, cat in enumerate(CHART_CATEGORIES)}
+    total = sum(values_by_idx.values())
+    zero_indices = {idx for idx, v in values_by_idx.items() if v == 0}
+    for dpt in list(series.findall("c:dPt", NS)):
+        idx_el = dpt.find("c:idx", NS)
+        if idx_el is not None and int(idx_el.get("val")) in zero_indices:
+            series.remove(dpt)
+    dlbls = series.find("c:dLbls", NS)
+    if dlbls is not None:
+        for dlbl in list(dlbls.findall("c:dLbl", NS)):
+            idx_el = dlbl.find("c:idx", NS)
+            if idx_el is None:
+                continue
+            i = int(idx_el.get("val"))
+            if i in zero_indices:
+                dlbls.remove(dlbl)
+            elif total > 0:
+                # Forcer le texte du label : "{value} ({pct} %)" — cohérent avec PR #5
+                # (sinon PowerPoint affiche valeur + retour ligne + % à cause de showVal+showPercent).
+                _set_dlbl_text(dlbl, f"{values_by_idx[i]} ({round(values_by_idx[i] / total * 100)} %)")
 
-def _set_textbox_with_prenoms(shape, items: list[dict], *, font_size_pt: int | None = None):
-    """Pose une liste 'Prénom : « commentaire »' dans un textbox, prénom en gras."""
+
+def _set_dlbl_text(dlbl, text: str):
+    """Pose un texte explicite sur un <c:dLbl> via <c:tx><c:rich>.
+
+    Place tx à la bonne position canonique (après c:idx + c:layout, avant c:spPr/txPr/show*).
+    Force showVal/showPercent à 0 pour éviter que PowerPoint duplique texte + %.
+    """
+    # Retirer ancien c:tx
+    for old_tx in dlbl.findall("c:tx", NS):
+        dlbl.remove(old_tx)
+    # Construire <c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>...</a:t></a:r></a:p></c:rich></c:tx>
+    tx = etree.Element(f"{{{NS_C}}}tx")
+    rich = etree.SubElement(tx, f"{{{NS_C}}}rich")
+    etree.SubElement(rich, f"{{{NS_A}}}bodyPr")
+    etree.SubElement(rich, f"{{{NS_A}}}lstStyle")
+    p = etree.SubElement(rich, f"{{{NS_A}}}p")
+    r = etree.SubElement(p, f"{{{NS_A}}}r")
+    t = etree.SubElement(r, f"{{{NS_A}}}t")
+    t.text = text
+    # Insertion canonique : juste avant c:spPr, c:txPr, c:dLblPos, ou show* — sinon append
+    insert_before = None
+    for tag in ("c:spPr", "c:txPr", "c:dLblPos", "c:showLegendKey", "c:showVal",
+                "c:showCatName", "c:showSerName", "c:showPercent", "c:showBubbleSize",
+                "c:separator", "c:extLst"):
+        el = dlbl.find(tag, NS)
+        if el is not None:
+            insert_before = el
+            break
+    if insert_before is not None:
+        insert_before.addprevious(tx)
+    else:
+        dlbl.append(tx)
+    # Désactiver showVal/showPercent pour ce dLbl (le texte explicite suffit)
+    for tag in ("c:showVal", "c:showPercent", "c:showCatName", "c:showSerName"):
+        el = dlbl.find(tag, NS)
+        if el is not None:
+            el.set("val", "0")
+
+
+# Couleur texte body PIC (gris très foncé, presque noir — extraite des slides golden)
+_PIC_BODY_COLOR = RGBColor(0x20, 0x21, 0x24)
+
+
+def _style_run(run, *, size_pt: int, bold: bool = False,
+               color: RGBColor = _PIC_BODY_COLOR, font_name: str = "Calibri"):
+    """Force explicitement la police, taille, gras et couleur sur un run.
+
+    Indispensable pour les contenus injectés dans des slides clonées cross-PPTX :
+    l'inheritance master/layout est perdue lors du clone (cf. memory
+    `feedback_pptx_cross_merge`), donc tout doit être posé au niveau run.
+    """
+    run.font.name = font_name
+    run.font.size = Pt(size_pt)
+    run.font.bold = bold
+    try:
+        run.font.color.rgb = color
+    except Exception:
+        # Couleur déjà héritée d'un thème scheme — ignore silencieux
+        pass
+
+
+def _set_textbox_with_prenoms(shape, items: list[dict], *, font_size_pt: int = 18):
+    """Pose une liste 'Prénom : « commentaire »' dans un textbox, prénom en gras.
+
+    Force Calibri + taille + couleur sur chaque run (pas d'héritage cross-PPTX).
+    Default 18pt = taille body lvl1 du master PIC original.
+    """
     tf = shape.text_frame
     tf.clear()
     if not items:
@@ -140,29 +234,32 @@ def _set_textbox_with_prenoms(shape, items: list[dict], *, font_size_pt: int | N
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         run_prenom = p.add_run()
         run_prenom.text = item["prenom"]
-        run_prenom.font.bold = True
+        _style_run(run_prenom, size_pt=font_size_pt, bold=True)
         run_rest = p.add_run()
         run_rest.text = f' : {_wrap_quote(item.get("commentaire", ""))}'
-        if font_size_pt:
-            run_prenom.font.size = Pt(font_size_pt)
-            run_rest.font.size = Pt(font_size_pt)
+        _style_run(run_rest, size_pt=font_size_pt, bold=False)
 
 
-def _set_commentaires_textbox(shape, commentaires: list[dict]):
-    """Pose 'Mes commentaires :' (gras) puis chaque ligne Prénom : « ... »."""
+def _set_commentaires_textbox(shape, commentaires: list[dict], *, font_size_pt: int = 14):
+    """Pose 'Mes commentaires :' (gras) puis chaque ligne Prénom : « ... ».
+
+    Force Calibri + taille + couleur sur chaque run. Default 14pt pour le textbox
+    de droite sous chaque chart Q1-Q10 (espace réduit, doit tenir).
+    """
     tf = shape.text_frame
     tf.clear()
     p1 = tf.paragraphs[0]
     r = p1.add_run()
     r.text = "Mes commentaires :"
-    r.font.bold = True
+    _style_run(r, size_pt=font_size_pt, bold=True)
     for item in commentaires:
         p = tf.add_paragraph()
         r1 = p.add_run()
         r1.text = item["prenom"]
-        r1.font.bold = True
+        _style_run(r1, size_pt=font_size_pt, bold=True)
         r2 = p.add_run()
         r2.text = f' : {_wrap_quote(item.get("commentaire", ""))}'
+        _style_run(r2, size_pt=font_size_pt, bold=False)
 
 
 # ---------- Anchor lookup ----------
