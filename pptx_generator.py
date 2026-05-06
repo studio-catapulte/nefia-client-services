@@ -37,6 +37,23 @@ def _get_color_map(levels: list[str]) -> dict[str, RGBColor]:
     return colors
 
 
+_C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+
+
+def _convert_pie_to_3d(chart) -> None:
+    """Convertit un c:pieChart en c:pie3DChart au niveau XML.
+
+    python-pptx 1.x ne sait pas écrire XL_CHART_TYPE.THREE_D_PIE (NotImplementedError),
+    mais accepte de créer un PIE classique puis de muter l'élément. PowerPoint lit
+    correctement le pie3DChart résultant. Les enfants (series, points, dLbls...) sont
+    identiques entre les deux, donc le swap est sûr.
+    """
+    chartSpace = chart._chartSpace
+    pie = chartSpace.find(f".//{{{_C_NS}}}pieChart")
+    if pie is not None:
+        pie.tag = f"{{{_C_NS}}}pie3DChart"
+
+
 def _aggregate(all_questionnaires: list[dict]) -> dict:
     """Agrège N questionnaires par question."""
     # Découvrir les niveaux de réponse et les questions
@@ -207,10 +224,19 @@ def _add_question_slide(prs, number, label, counter, item_comments, color_map, r
         plot = chart.plots[0]
         plot.has_data_labels = True
         data_labels = plot.data_labels
-        data_labels.show_percentage = True
-        data_labels.show_value = True
+        data_labels.show_percentage = False
+        data_labels.show_value = False
         data_labels.show_category_name = False
         data_labels.font.size = Pt(10)
+
+        total_values = sum(values)
+        for idx, value in enumerate(values):
+            pct = (value / total_values * 100) if total_values else 0
+            point = series.points[idx]
+            point.data_label.has_text_frame = True
+            point.data_label.text_frame.text = f"{value} ({pct:.0f} %)"
+
+        _convert_pie_to_3d(chart)
 
     # Commentaires à droite
     if item_comments:
@@ -312,10 +338,19 @@ def _add_global_summary_slide(prs, agg, color_map):
         plot = chart.plots[0]
         plot.has_data_labels = True
         dl = plot.data_labels
-        dl.show_percentage = True
-        dl.show_value = True
+        dl.show_percentage = False
+        dl.show_value = False
         dl.show_category_name = False
         dl.font.size = Pt(10)
+
+        total_vals = sum(vals)
+        for idx, value in enumerate(vals):
+            pct = (value / total_vals * 100) if total_vals else 0
+            point = series.points[idx]
+            point.data_label.has_text_frame = True
+            point.data_label.text_frame.text = f"{value} ({pct:.0f} %)"
+
+        _convert_pie_to_3d(chart)
 
 
 def _add_text_slide(prs, title, entries):
