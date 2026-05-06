@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 *.pptx
 *.csv
+
+# Templates Pic-Formation (assets versionnés, embarqués dans l'image Docker)
+!templates/*.pptx
