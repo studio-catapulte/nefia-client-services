@@ -147,6 +147,11 @@ def _update_pie3d_chart(chart_shape, counts: dict[str, int]):
             series.remove(dpt)
     dlbls = series.find("c:dLbls", NS)
     if dlbls is not None:
+        # Désactiver les flags par défaut au niveau série : sinon PowerPoint rend
+        # un label DEFAULT "0 ; 0%" (locale-dépendant) pour chaque point val=0
+        # qui n'a pas d'override <c:dLbl> explicite. On laisse les overrides per-point
+        # piloter entièrement l'affichage via _set_dlbl_text + showVal=0/showPercent=0.
+        _set_series_dlbls_flags_off(dlbls)
         for dlbl in list(dlbls.findall("c:dLbl", NS)):
             idx_el = dlbl.find("c:idx", NS)
             if idx_el is None:
@@ -160,15 +165,50 @@ def _update_pie3d_chart(chart_shape, counts: dict[str, int]):
                 _set_dlbl_text(dlbl, f"{values_by_idx[i]} ({round(values_by_idx[i] / total * 100)} %)")
 
 
+def _set_series_dlbls_flags_off(dlbls):
+    """Force showVal=0, showPercent=0, showCatName=0 sur le <c:dLbls> SÉRIE.
+
+    Les flags show* au niveau série dictent le rendu DEFAULT des labels pour les
+    points sans override <c:dLbl> per-point. Si un point a val=0 sans override,
+    PowerPoint affiche "0 ; 0%" (locale-dépendant). En mettant ces flags à 0,
+    seuls les points avec un override explicite (avec _set_dlbl_text) afficheront
+    un label.
+
+    showLegendKey reste à 0 (cohérent avec template).
+    """
+    flags_to_zero = {
+        "c:showLegendKey": "0",
+        "c:showVal": "0",
+        "c:showCatName": "0",
+        "c:showSerName": "0",
+        "c:showPercent": "0",
+        "c:showBubbleSize": "0",
+    }
+    for tag, val in flags_to_zero.items():
+        el = dlbls.find(tag, NS)
+        if el is not None:
+            el.set("val", val)
+        else:
+            # Crée le flag manquant (rare, mais possible si template incomplet)
+            local = tag.split(":")[1]
+            new_el = etree.SubElement(dlbls, f"{{{NS_C}}}{local}")
+            new_el.set("val", val)
+
+
 def _set_dlbl_text(dlbl, text: str):
     """Pose un texte explicite sur un <c:dLbl> via <c:tx><c:rich>.
 
     Place tx à la bonne position canonique (après c:idx + c:layout, avant c:spPr/txPr/show*).
     Force showVal/showPercent à 0 pour éviter que PowerPoint duplique texte + %.
+    Supprime aussi un éventuel <c:delete val="1"/> hérité du template (sinon
+    le label resterait masqué malgré le texte explicite).
     """
     # Retirer ancien c:tx
     for old_tx in dlbl.findall("c:tx", NS):
         dlbl.remove(old_tx)
+    # Retirer un éventuel <c:delete> hérité du template
+    for old_del in dlbl.findall("c:delete", NS):
+        dlbl.remove(old_del)
     # Construire <c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>...</a:t></a:r></a:p></c:rich></c:tx>
     tx = etree.Element(f"{{{NS_C}}}tx")
     rich = etree.SubElement(tx, f"{{{NS_C}}}rich")
