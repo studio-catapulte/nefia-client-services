@@ -352,10 +352,11 @@ def _build_csv_bytes(participants: list[dict]) -> bytes:
 
 
 def _build_raw_data(aggregates: dict) -> dict:
-    """Format consommé par n8n pour Insert dans questionnaire_responses.
+    """Blob JSON complet stocké dans `executions.raw_data_json` (1 row/exécution).
 
-    Une ligne par (question_id, response_label, count) — n8n itère sur
-    `questions[].counts` pour insérer 4 rows par question (10 × 4 = 40 rows).
+    Contient counts par question/modalité, commentaires détaillés par question,
+    remarques + souhaits libres avec prénoms. Tout ce qu'il faut pour reconstruire
+    l'analytique a posteriori (drop du long-format intermédiaire).
     """
     questions_out = []
     for i, q in enumerate(aggregates.get("questions", [])[:10], start=1):
@@ -363,12 +364,13 @@ def _build_raw_data(aggregates: dict) -> dict:
             "question_id": i,
             "question_label": Q_WORDINGS[i - 1],
             "counts": q.get("counts", {}),
+            "commentaires": q.get("commentaires", []),  # [{prenom, commentaire}]
         })
     return {
         "nb_participants": aggregates.get("nb_participants", 0),
         "questions": questions_out,
-        "remarques_count": len(aggregates.get("remarques_libres", [])),
-        "souhaits_count": len(aggregates.get("souhaits_libres", [])),
+        "remarques_libres": aggregates.get("remarques_libres", []),
+        "souhaits_libres": aggregates.get("souhaits_libres", []),
     }
 
 
