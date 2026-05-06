@@ -12,7 +12,9 @@ import binascii
 import csv
 import io
 import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import (
@@ -32,6 +34,12 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from extract_pic import (
+    Q_WORDINGS,
+    aggregate_participants,
+    extract_questionnaires_pic,
+)
+from inject_slides import inject_pic_analysis
 from logging_config import configure_logging, get_logger, request_id_ctx
 from ocr import extract_from_pdf
 from pptx_generator import generate_pptx
@@ -39,6 +47,15 @@ from security import require_api_key
 
 ALLOWED_CONTENT_TYPES = {"application/pdf"}
 ALLOWED_EXTENSIONS = {".pdf"}
+ALLOWED_PPTX_CONTENT_TYPES = {
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/octet-stream",  # certains uploaders (Tally) envoient octet-stream
+}
+ALLOWED_PPTX_EXTENSIONS = {".pptx"}
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+ANALYSIS_TEMPLATE = TEMPLATES_DIR / "analysis-block.pptx"
+CLOSING_TEMPLATE = TEMPLATES_DIR / "commercial-closing.pptx"
 
 MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "20"))
 MAX_FILES_PER_REQUEST = int(os.environ.get("MAX_FILES_PER_REQUEST", "100"))
@@ -49,7 +66,7 @@ logger = get_logger()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
-app = FastAPI(title="Nefia Questionnaire Processor", version="2.2.0")
+app = FastAPI(title="Nefia Questionnaire Processor", version="2.3.0")
 app.state.limiter = limiter
 
 
@@ -283,3 +300,219 @@ async def process_questionnaires_json(
         sc = result.pop("_status_code")
         return JSONResponse(status_code=sc, content=result)
     return result
+
+
+# =====================================================================
+# v3 — endpoint /inject_slides (Pic-Formation injection-driven)
+# =====================================================================
+#
+# Le formateur upload son propre PPTX déjà rempli + les scans PDF des
+# questionnaires. On extrait l'OCR (Pic-specific : 10 questions Likert
+# + remarques + souhaits), on injecte 15 slides d'analyse avant la slide
+# « Analyse des résultats » + 6 slides closing commercial.
+#
+# Réponse : pptx_base64 + csv_base64 + raw_data (consommé par n8n pour
+# pousser dans la table NocoDB questionnaire_responses).
+
+
+def _validate_pptx_upload(file: UploadFile) -> None:
+    if file.content_type not in ALLOWED_PPTX_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported content-type for {file.filename!r}: {file.content_type}",
+        )
+    fname = file.filename or ""
+    ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+    if ext not in ALLOWED_PPTX_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported extension for {fname!r}",
+        )
+
+
+def _build_csv_bytes(participants: list[dict]) -> bytes:
+    """CSV : 1 ligne par (participant × question) — réutilisable analytics."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Participant", "Question_ID", "Question", "Reponse", "Commentaire"])
+    for p in participants:
+        prenom = p.get("prenom", "")
+        reponses = p.get("reponses", {}) or {}
+        commentaires = p.get("commentaires_par_question", {}) or {}
+        for q_idx in range(1, 11):
+            q_key = f"Q{q_idx}"
+            writer.writerow([
+                prenom,
+                q_idx,
+                Q_WORDINGS[q_idx - 1],
+                reponses.get(q_key, "Non renseigné"),
+                commentaires.get(q_key, "") or "",
+            ])
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def _build_raw_data(aggregates: dict) -> dict:
+    """Format consommé par n8n pour Insert dans questionnaire_responses.
+
+    Une ligne par (question_id, response_label, count) — n8n itère sur
+    `questions[].counts` pour insérer 4 rows par question (10 × 4 = 40 rows).
+    """
+    questions_out = []
+    for i, q in enumerate(aggregates.get("questions", [])[:10], start=1):
+        questions_out.append({
+            "question_id": i,
+            "question_label": Q_WORDINGS[i - 1],
+            "counts": q.get("counts", {}),
+        })
+    return {
+        "nb_participants": aggregates.get("nb_participants", 0),
+        "questions": questions_out,
+        "remarques_count": len(aggregates.get("remarques_libres", [])),
+        "souhaits_count": len(aggregates.get("souhaits_libres", [])),
+    }
+
+
+@app.post("/inject_slides", dependencies=[Depends(require_api_key)])
+@limiter.limit(f"{RATE_LIMIT_PER_MINUTE}/minute")
+async def inject_slides_endpoint(
+    request: Request,
+    pptx_input: UploadFile = File(..., description="PPTX formateur (déjà rempli)"),
+    scans_pdf: list[UploadFile] = File(..., description="Scans PDF des questionnaires"),
+    session_id: str = Form(..., description="Identifiant de session (slug humain)"),
+    client: str = Form(..., description="Nom du client / structure"),
+    titre: str = Form(..., description="Titre de la formation"),
+):
+    """v3 Pic-Formation : injection bloc analyse + closing commercial dans le PPTX formateur."""
+    rid = request.state.request_id
+
+    # --- Validations ---
+    if not ANALYSIS_TEMPLATE.exists() or not CLOSING_TEMPLATE.exists():
+        logger.error(
+            "templates_missing",
+            analysis_exists=ANALYSIS_TEMPLATE.exists(),
+            closing_exists=CLOSING_TEMPLATE.exists(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server misconfiguration: templates missing",
+        )
+
+    _validate_pptx_upload(pptx_input)
+    if len(scans_pdf) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Too many files: {len(scans_pdf)} > {MAX_FILES_PER_REQUEST}",
+        )
+    for f in scans_pdf:
+        _validate_upload_file(f)
+
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+
+    # --- Read everything into memory + persist on disk for path-based libs ---
+    pptx_bytes = await pptx_input.read()
+    if len(pptx_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"PPTX input too large ({len(pptx_bytes)} > {max_bytes})",
+        )
+
+    pdf_files: list[tuple[str, bytes]] = []
+    for f in scans_pdf:
+        b = await f.read()
+        if len(b) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File {f.filename!r} too large ({len(b)} > {max_bytes})",
+            )
+        pdf_files.append((f.filename or "questionnaire.pdf", b))
+
+    logger.info(
+        "inject_slides_started",
+        session_id=session_id,
+        client=client,
+        titre=titre,
+        n_pdfs=len(pdf_files),
+        pptx_size=len(pptx_bytes),
+    )
+
+    # --- Pipeline ---
+    with tempfile.TemporaryDirectory(prefix="inject_") as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        # 1. Persist PPTX input
+        pptx_input_path = tmpdir_path / "formateur.pptx"
+        pptx_input_path.write_bytes(pptx_bytes)
+
+        # 2. OCR each PDF
+        all_participants: list[dict] = []
+        ocr_errors: list[dict] = []
+        for fname, pdf_bytes in pdf_files:
+            pdf_path = tmpdir_path / fname
+            try:
+                pdf_path.write_bytes(pdf_bytes)
+                extraction = extract_questionnaires_pic(str(pdf_path))
+                participants = extraction.get("participants", [])
+                all_participants.extend(participants)
+                logger.info(
+                    "ocr_done",
+                    filename=fname,
+                    participants_extracted=len(participants),
+                )
+            except Exception as e:
+                logger.exception("ocr_failed", filename=fname)
+                ocr_errors.append({"file": fname, "error": str(e)})
+
+        if not all_participants:
+            logger.warning("no_questionnaires_extracted", errors=ocr_errors)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": "Aucun questionnaire extrait",
+                    "details": ocr_errors,
+                    "request_id": rid,
+                },
+            )
+
+        # 3. Aggregate
+        aggregates = aggregate_participants({"participants": all_participants})
+
+        # 4. Inject
+        out_path = tmpdir_path / "out.pptx"
+        try:
+            inject_pic_analysis(
+                formateur_pptx_path=pptx_input_path,
+                aggregates=aggregates,
+                output_path=out_path,
+                analysis_template_path=ANALYSIS_TEMPLATE,
+                closing_template_path=CLOSING_TEMPLATE,
+            )
+        except Exception as e:
+            logger.exception("inject_failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Injection failed: {type(e).__name__}: {e}",
+            )
+
+        out_pptx_bytes = out_path.read_bytes()
+
+    csv_bytes = _build_csv_bytes(all_participants)
+
+    logger.info(
+        "inject_slides_completed",
+        session_id=session_id,
+        nb_participants=aggregates["nb_participants"],
+        ocr_errors=len(ocr_errors),
+        output_size=len(out_pptx_bytes),
+    )
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "client": client,
+        "titre": titre,
+        "nb_participants": aggregates["nb_participants"],
+        "errors": ocr_errors,
+        "pptx_base64": base64.b64encode(out_pptx_bytes).decode(),
+        "csv_base64": base64.b64encode(csv_bytes).decode(),
+        "raw_data": _build_raw_data(aggregates),
+        "request_id": rid,
+    }
