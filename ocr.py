@@ -9,6 +9,10 @@ import os
 
 from mistralai.client import Mistral
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 STRUCTURATION_PROMPT = """Voici le contenu OCR d'UN questionnaire de satisfaction rempli par UN participant.
 Les cases cochées sont indiquées par ☑ ou ☒. Les cases vides sont vides ou ☐.
@@ -93,9 +97,17 @@ def extract_from_pdf(pdf_bytes: bytes) -> list[dict]:
     pages_md = _ocr_pdf(client, pdf_bytes)
 
     questionnaires = []
-    for md in pages_md:
+    for idx, md in enumerate(pages_md):
         if len(md.strip()) < 50:
             continue
+        # Log la zone d'en-tête (prénom + premiers items) pour diagnostiquer
+        # les cas où la structuration retourne "Anonyme" / participant manquant.
+        logger.info(
+            "ocr_page_header",
+            page_index=idx,
+            chars=len(md),
+            header_preview=md[:600],
+        )
         data = _structure_page(client, md)
         questionnaires.append(data)
 
