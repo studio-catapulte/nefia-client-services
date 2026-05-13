@@ -209,10 +209,14 @@ def _set_dlbl_text(dlbl, text: str):
     # Retirer un éventuel <c:delete> hérité du template
     for old_del in dlbl.findall("c:delete", NS):
         dlbl.remove(old_del)
-    # Construire <c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>...</a:t></a:r></a:p></c:rich></c:tx>
+    # Construire <c:tx><c:rich><a:bodyPr wrap="none"/><a:lstStyle/><a:p><a:r><a:t>...</a:t></a:r></a:p></c:rich></c:tx>
+    # wrap="none" : feedback Inès 13/05 — décocher "Renvoyer le texte à la ligne dans la forme"
+    # côté étiquette. Sans ça PowerPoint applique wrap="square" par défaut → texte cassé en
+    # plusieurs lignes dans une boîte étriquée.
     tx = etree.Element(f"{{{NS_C}}}tx")
     rich = etree.SubElement(tx, f"{{{NS_C}}}rich")
-    etree.SubElement(rich, f"{{{NS_A}}}bodyPr")
+    body_pr = etree.SubElement(rich, f"{{{NS_A}}}bodyPr")
+    body_pr.set("wrap", "none")
     etree.SubElement(rich, f"{{{NS_A}}}lstStyle")
     p = etree.SubElement(rich, f"{{{NS_A}}}p")
     r = etree.SubElement(p, f"{{{NS_A}}}r")
@@ -260,8 +264,84 @@ def _style_run(run, *, size_pt: int, bold: bool = False,
         pass
 
 
+def _apply_pic_bullet(paragraph):
+    """Force le style de puce PIC sur un paragraphe : Wingdings 'q' bleu 0070C0.
+
+    Reproduit exactement le pPr du template `analysis-block.pptx` slide 13 (Vos
+    remarques), pour que les paragraphes dynamiques injectés via `add_paragraph()`
+    soient rendus avec les mêmes puces que les slides statiques. Sans ça, les puces
+    héritent du layout, qui est perdu cross-PPTX clone (cf. memory
+    `feedback_pptx_cross_merge_fonts`).
+
+    Idempotent : remplace marL/indent/algn s'ils existent, et toute conf bullet
+    précédente (buNone, buAutoNum, buChar) est retirée avant insertion.
+    """
+    pPr = paragraph._pPr
+    if pPr is None:
+        # Crée le pPr en première position dans <a:p>
+        p = paragraph._p
+        pPr = etree.SubElement(p, f"{{{NS_A}}}pPr")
+        p.remove(pPr)
+        p.insert(0, pPr)
+
+    pPr.set("marL", "285750")
+    pPr.set("indent", "-285750")
+    pPr.set("algn", "l")
+
+    # Purger les éléments bullet existants pour éviter doublons (buNone bloquerait l'affichage)
+    for tag in ("buNone", "buAutoNum", "buChar", "buFont", "buClr", "buSzPct", "buSzPts"):
+        for el in pPr.findall(f"{{{NS_A}}}{tag}"):
+            pPr.remove(el)
+
+    # Reconstruire l'ordre canonique : lnSpc → buClr → buSzPct → buFont → buChar
+    lnSpc = pPr.find(f"{{{NS_A}}}lnSpc")
+    if lnSpc is None:
+        lnSpc = etree.SubElement(pPr, f"{{{NS_A}}}lnSpc")
+        pPr.remove(lnSpc)
+        pPr.insert(0, lnSpc)
+        spcPct = etree.SubElement(lnSpc, f"{{{NS_A}}}spcPct")
+        spcPct.set("val", "150000")
+
+    buClr = etree.SubElement(pPr, f"{{{NS_A}}}buClr")
+    srgbClr = etree.SubElement(buClr, f"{{{NS_A}}}srgbClr")
+    srgbClr.set("val", "0070C0")
+
+    buSzPct = etree.SubElement(pPr, f"{{{NS_A}}}buSzPct")
+    buSzPct.set("val", "75000")
+
+    buFont = etree.SubElement(pPr, f"{{{NS_A}}}buFont")
+    buFont.set("typeface", "Wingdings")
+    buFont.set("panose", "05000000000000000000")
+    buFont.set("pitchFamily", "2")
+    buFont.set("charset", "2")
+
+    buChar = etree.SubElement(pPr, f"{{{NS_A}}}buChar")
+    buChar.set("char", "q")
+
+
+def _clear_paragraph_bullet(paragraph):
+    """Marque explicitement un paragraphe SANS puce (buNone).
+
+    Utile pour les paragraphes 'header' (ex: 'Mes commentaires :') au-dessus
+    d'une liste à puces — sinon ils hériteraient de la puce du paragraphe suivant
+    ou du layout.
+    """
+    pPr = paragraph._pPr
+    if pPr is None:
+        p = paragraph._p
+        pPr = etree.SubElement(p, f"{{{NS_A}}}pPr")
+        p.remove(pPr)
+        p.insert(0, pPr)
+    for tag in ("buAutoNum", "buChar"):
+        for el in pPr.findall(f"{{{NS_A}}}{tag}"):
+            pPr.remove(el)
+    if pPr.find(f"{{{NS_A}}}buNone") is None:
+        buNone = etree.SubElement(pPr, f"{{{NS_A}}}buNone")
+
+
 def _set_textbox_with_prenoms(shape, items: list[dict], *, font_size_pt: int = 18):
-    """Pose une liste 'Prénom : « commentaire »' dans un textbox, prénom en gras.
+    """Pose une liste 'Prénom : « commentaire »' dans un textbox, prénom en gras,
+    avec puces PIC (Wingdings 'q' bleu) sur chaque item.
 
     Force Calibri + taille + couleur sur chaque run (pas d'héritage cross-PPTX).
     Default 18pt = taille body lvl1 du master PIC original.
@@ -278,13 +358,15 @@ def _set_textbox_with_prenoms(shape, items: list[dict], *, font_size_pt: int = 1
         run_rest = p.add_run()
         run_rest.text = f' : {_wrap_quote(item.get("commentaire", ""))}'
         _style_run(run_rest, size_pt=font_size_pt, bold=False)
+        _apply_pic_bullet(p)
 
 
-def _set_commentaires_textbox(shape, commentaires: list[dict], *, font_size_pt: int = 14):
-    """Pose 'Mes commentaires :' (gras) puis chaque ligne Prénom : « ... ».
+def _set_commentaires_textbox(shape, commentaires: list[dict], *, font_size_pt: int = 16):
+    """Pose 'Mes commentaires :' (gras, sans puce) puis chaque ligne Prénom : « ... »
+    avec puces PIC.
 
-    Force Calibri + taille + couleur sur chaque run. Default 14pt pour le textbox
-    de droite sous chaque chart Q1-Q10 (espace réduit, doit tenir).
+    Force Calibri + taille + couleur sur chaque run. Default 16pt (feedback Inès
+    13/05 : minimum 16, plus 14).
     """
     tf = shape.text_frame
     tf.clear()
@@ -292,6 +374,7 @@ def _set_commentaires_textbox(shape, commentaires: list[dict], *, font_size_pt: 
     r = p1.add_run()
     r.text = "Mes commentaires :"
     _style_run(r, size_pt=font_size_pt, bold=True)
+    _clear_paragraph_bullet(p1)
     for item in commentaires:
         p = tf.add_paragraph()
         r1 = p.add_run()
@@ -300,6 +383,7 @@ def _set_commentaires_textbox(shape, commentaires: list[dict], *, font_size_pt: 
         r2 = p.add_run()
         r2.text = f' : {_wrap_quote(item.get("commentaire", ""))}'
         _style_run(r2, size_pt=font_size_pt, bold=False)
+        _apply_pic_bullet(p)
 
 
 # ---------- Anchor lookup ----------
