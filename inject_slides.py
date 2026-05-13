@@ -209,16 +209,19 @@ def _set_dlbl_text(dlbl, text: str):
     # Retirer un éventuel <c:delete> hérité du template
     for old_del in dlbl.findall("c:delete", NS):
         dlbl.remove(old_del)
-    # Construire <c:tx><c:rich><a:bodyPr wrap="none"/><a:lstStyle/><a:p><a:r><a:t>...</a:t></a:r></a:p></c:rich></c:tx>
+    # Construire <c:tx><c:rich><a:bodyPr wrap="none"/><a:lstStyle/>
+    #   <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:t>...</a:t></a:r></a:p></c:rich></c:tx>
     # wrap="none" : feedback Inès 13/05 — décocher "Renvoyer le texte à la ligne dans la forme"
-    # côté étiquette. Sans ça PowerPoint applique wrap="square" par défaut → texte cassé en
-    # plusieurs lignes dans une boîte étriquée.
+    # buNone : sans ça PowerPoint applique le bullet par défaut du chart master (carré
+    # blanc/transparent à gauche du label, visible feedback Inès "carré jaune" 13/05)
     tx = etree.Element(f"{{{NS_C}}}tx")
     rich = etree.SubElement(tx, f"{{{NS_C}}}rich")
     body_pr = etree.SubElement(rich, f"{{{NS_A}}}bodyPr")
     body_pr.set("wrap", "none")
     etree.SubElement(rich, f"{{{NS_A}}}lstStyle")
     p = etree.SubElement(rich, f"{{{NS_A}}}p")
+    pPr = etree.SubElement(p, f"{{{NS_A}}}pPr")
+    etree.SubElement(pPr, f"{{{NS_A}}}buNone")
     r = etree.SubElement(p, f"{{{NS_A}}}r")
     t = etree.SubElement(r, f"{{{NS_A}}}t")
     t.text = text
