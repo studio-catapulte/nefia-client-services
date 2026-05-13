@@ -198,10 +198,10 @@ def aggregate_participants(extraction: dict) -> dict:
         counts = {r: 0 for r in RESPONSES_VALID}
         commentaires = []
         for p in participants:
-            resp = (p.get("reponses") or {}).get(q_key, "").strip()
+            resp = ((p.get("reponses") or {}).get(q_key) or "").strip()
             if resp in counts:
                 counts[resp] += 1
-            comm = (p.get("commentaires_par_question") or {}).get(q_key, "").strip()
+            comm = ((p.get("commentaires_par_question") or {}).get(q_key) or "").strip()
             if comm:
                 commentaires.append({"prenom": p.get("prenom", ""), "commentaire": comm})
         questions.append({"counts": counts, "commentaires": commentaires})
