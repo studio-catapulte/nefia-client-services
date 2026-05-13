@@ -243,6 +243,28 @@ def _set_dlbl_text(dlbl, text: str):
         el = dlbl.find(tag, NS)
         if el is not None:
             el.set("val", "0")
+    # Forcer spPr noFill + ln noFill si absent — sinon PowerPoint applique le
+    # rendu par défaut (fond blanc + bordure noire = "carré blanc" sur slice
+    # colorée, feedback Inès 13/05). Le template a noFill explicite seulement
+    # sur le dLbl idx=0 ; les autres (qui étaient delete=1) n'ont pas de spPr.
+    if dlbl.find("c:spPr", NS) is None:
+        spPr = etree.Element(f"{{{NS_C}}}spPr")
+        etree.SubElement(spPr, f"{{{NS_A}}}noFill")
+        ln = etree.SubElement(spPr, f"{{{NS_A}}}ln")
+        etree.SubElement(ln, f"{{{NS_A}}}noFill")
+        # Position canonique : juste après c:tx, avant c:txPr/c:dLblPos/c:show*
+        insert_before = None
+        for tag in ("c:txPr", "c:dLblPos", "c:showLegendKey", "c:showVal",
+                    "c:showCatName", "c:showSerName", "c:showPercent",
+                    "c:showBubbleSize", "c:separator", "c:extLst"):
+            el = dlbl.find(tag, NS)
+            if el is not None:
+                insert_before = el
+                break
+        if insert_before is not None:
+            insert_before.addprevious(spPr)
+        else:
+            dlbl.append(spPr)
 
 
 # Couleur texte body PIC (gris très foncé, presque noir — extraite des slides golden)
