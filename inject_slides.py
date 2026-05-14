@@ -152,6 +152,13 @@ def _update_pie3d_chart(chart_shape, counts: dict[str, int]):
         # qui n'a pas d'override <c:dLbl> explicite. On laisse les overrides per-point
         # piloter entièrement l'affichage via _set_dlbl_text + showVal=0/showPercent=0.
         _set_series_dlbls_flags_off(dlbls)
+        # Le manualLayout idx=0 du template est calibré pour le centre VISUEL en
+        # cas mono-cat 100% (offset y=-0.45 depuis le centroid du disque entier).
+        # En multi-cat, le centroid d'une slice n'est plus au centre du disque
+        # → l'offset envoie le label hors slice. Fix : strip le manualLayout +
+        # forcer dLblPos=ctr (= centroid de chaque slice) en multi-cat.
+        nb_non_zero = sum(1 for v in values_by_idx.values() if v > 0)
+        multi_cat = nb_non_zero >= 2
         for dlbl in list(dlbls.findall("c:dLbl", NS)):
             idx_el = dlbl.find("c:idx", NS)
             if idx_el is None:
@@ -160,9 +167,40 @@ def _update_pie3d_chart(chart_shape, counts: dict[str, int]):
             if i in zero_indices:
                 dlbls.remove(dlbl)
             elif total > 0:
+                if multi_cat:
+                    _strip_dlbl_layout_and_force_ctr(dlbl)
                 # Forcer le texte du label : "{value} ({pct} %)" — cohérent avec PR #5
                 # (sinon PowerPoint affiche valeur + retour ligne + % à cause de showVal+showPercent).
                 _set_dlbl_text(dlbl, f"{values_by_idx[i]} ({round(values_by_idx[i] / total * 100)} %)")
+
+
+def _strip_dlbl_layout_and_force_ctr(dlbl):
+    """En multi-cat : vire le <c:layout> hérité du template + force dLblPos=ctr.
+
+    Le template a un manualLayout idx=0 calibré pour le cas mono-cat 100%
+    (offset depuis centroid disque entier). En multi-cat, on veut le label
+    au centroid de la slice → dLblPos=ctr sans offset.
+    """
+    for layout in dlbl.findall("c:layout", NS):
+        dlbl.remove(layout)
+    existing = dlbl.find("c:dLblPos", NS)
+    if existing is not None:
+        existing.set("val", "ctr")
+        return
+    pos = etree.Element(f"{{{NS_C}}}dLblPos")
+    pos.set("val", "ctr")
+    # Position canonique : avant les c:show* / c:separator / c:extLst
+    insert_before = None
+    for tag in ("c:showLegendKey", "c:showVal", "c:showCatName", "c:showSerName",
+                "c:showPercent", "c:showBubbleSize", "c:separator", "c:extLst"):
+        el = dlbl.find(tag, NS)
+        if el is not None:
+            insert_before = el
+            break
+    if insert_before is not None:
+        insert_before.addprevious(pos)
+    else:
+        dlbl.append(pos)
 
 
 def _set_series_dlbls_flags_off(dlbls):
