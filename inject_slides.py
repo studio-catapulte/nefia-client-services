@@ -2,13 +2,17 @@
 Pipeline v3 Pic-Formation : injection de slides d'analyse dans le PPTX formateur.
 
 Architecture :
-    formateur.pptx (input client) → injection avant slide "Analyse des résultats" :
-        - 15 slides d'analyse (depuis templates/analysis-block.pptx, remplies avec les données OCR)
-    → append à la fin :
-        - 6 slides closing commercial PIC (depuis templates/commercial-closing.pptx, statiques)
+    formateur.pptx (input client) →
+      - injection en position 2 (après slide titre formateur) :
+        - 1 slide sommaire statique (templates/intro-block.pptx)
+      - injection avant slide "Analyse des résultats" :
+        - 15 slides d'analyse (depuis templates/analysis-block.pptx, remplies avec OCR)
+      - append à la fin :
+        - 6 slides closing commercial PIC (templates/commercial-closing.pptx, statiques)
 
-Le formateur garde la maîtrise de son template/identité ; on n'apporte que la valeur
-ajoutée IA (analyse questionnaire) + le bloc commercial PIC standardisé.
+Le formateur garde la maîtrise de son template/identité (titre, rappels intervention,
+ancre, slides post-ancre) ; on injecte les éléments standard reproductibles du livrable
+final Pic (sommaire + analyse + closing commercial).
 
 Usage :
     from inject_slides import inject_pic_analysis
@@ -17,6 +21,7 @@ Usage :
         aggregates=…,  # output de extract.aggregate_participants
         analysis_template_path="templates/analysis-block.pptx",
         closing_template_path="templates/commercial-closing.pptx",
+        intro_template_path="templates/intro-block.pptx",
         output_path="out.pptx",
     )
 
@@ -777,22 +782,26 @@ def inject_pic_analysis(
     *,
     analysis_template_path: str | Path = "templates/analysis-block.pptx",
     closing_template_path: str | Path = "templates/commercial-closing.pptx",
+    intro_template_path: str | Path = "templates/intro-block.pptx",
     anchor_title: str = ANCHOR_TITLE,
 ) -> Path:
-    """Injecte le bloc analyse + closing commercial dans un PPTX formateur PIC.
+    """Injecte sommaire + bloc analyse + closing commercial dans un PPTX formateur PIC.
 
     Étapes :
       1. Ouvre le PPTX formateur (cible).
       2. Trouve la slide d'ancre "Analyse des résultats" (fallback : position 3).
-      3. Ouvre analysis-block.pptx, remplit avec les agrégats, sauve dans un tmpfile.
-      4. Clone les 15 slides analyse vers le formateur, AVANT l'ancre.
-      5. Clone les 6 slides closing commercial à la fin.
-      6. Sauve dans output_path.
+      3. Injecte intro-block (1 slide sommaire) en position 2 (après titre formateur).
+         Ajuste anchor_idx en conséquence (+1 si anchor_idx >= 1).
+      4. Ouvre analysis-block.pptx, remplit avec les agrégats, sauve dans un tmpfile.
+      5. Clone les 15 slides analyse vers le formateur, AVANT l'ancre (ajustée).
+      6. Clone les 6 slides closing commercial à la fin.
+      7. Sauve dans output_path.
     """
     formateur_pptx_path = Path(formateur_pptx_path)
     output_path = Path(output_path)
     analysis_template_path = Path(analysis_template_path)
     closing_template_path = Path(closing_template_path)
+    intro_template_path = Path(intro_template_path)
 
     if not formateur_pptx_path.exists():
         raise FileNotFoundError(f"PPTX formateur introuvable : {formateur_pptx_path}")
@@ -800,6 +809,8 @@ def inject_pic_analysis(
         raise FileNotFoundError(f"Template analyse introuvable : {analysis_template_path}")
     if not closing_template_path.exists():
         raise FileNotFoundError(f"Template closing introuvable : {closing_template_path}")
+    if not intro_template_path.exists():
+        raise FileNotFoundError(f"Template intro introuvable : {intro_template_path}")
 
     # 1. Ouvrir le formateur
     prs = Presentation(str(formateur_pptx_path))
@@ -813,7 +824,14 @@ def inject_pic_analysis(
     else:
         print(f"  [OK] Ancre '{anchor_title}' trouvée à l'index {anchor_idx}")
 
-    # 3. Préparer analysis-block rempli
+    # 3. Injecter intro-block (sommaire statique) en position 2 (= avant index 1)
+    n_intro = inject_external_slides(prs, intro_template_path, before_idx=1)
+    print(f"  [OK] {n_intro} slide sommaire injectée en position 2")
+    # L'ancre a été décalée si elle était à l'index >= 1
+    if anchor_idx >= 1:
+        anchor_idx += n_intro
+
+    # 4. Préparer analysis-block rempli
     analysis_prs = Presentation(str(analysis_template_path))
     fill_analysis_block(analysis_prs, aggregates)
     with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
@@ -821,17 +839,17 @@ def inject_pic_analysis(
     analysis_prs.save(str(analysis_filled_path))
 
     try:
-        # 4. Injecter avant l'ancre
+        # 5. Injecter avant l'ancre (ajustée)
         n_inj = inject_external_slides(prs, analysis_filled_path, before_idx=anchor_idx)
         print(f"  [OK] {n_inj} slides analyse injectées avant l'ancre")
 
-        # 5. Append closing commercial
+        # 6. Append closing commercial
         n_close = inject_external_slides(prs, closing_template_path, before_idx=None)
         print(f"  [OK] {n_close} slides closing commercial appendées")
     finally:
         analysis_filled_path.unlink(missing_ok=True)
 
-    # 6. Sauver
+    # 7. Sauver
     prs.save(str(output_path))
     print(f"  [OK] PPTX final → {output_path} ({len(prs.slides)} slides)")
     return output_path
