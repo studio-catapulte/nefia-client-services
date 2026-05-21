@@ -271,6 +271,62 @@ def force_title_left_align(slide: Slide, *, font_size: int = 2400,
     return True
 
 
+# ---------- Bullets inline (analysis-block slide 0 "Evaluation") ----------
+
+def force_inline_square_bullets(slide: Slide, *, shape_name: str = "Rectangle 3") -> list[str]:
+    """Embed Wingdings square bullet inline dans chaque <a:pPr> du shape.
+
+    POURQUOI :
+        Le clone cross-PPTX perd l'héritage slideLayout → la slide arrive sous
+        le layout 'Vide' du formateur qui n'a aucune def de puce. La slide
+        carry déjà <a:buClr>0070C0</a:buClr> en pPr inline (couleur bleue)
+        mais pas le buFont/buChar du layout source. Du coup : aucune puce
+        visible côté livrable (cf. feedback Inès 20/05, slide 4 "puces pas charte").
+
+    SPEC golden (extrait MALECOT slideLayout47 ph idx=1) :
+        <a:buFont typeface="Wingdings" pitchFamily="2" charset="2"/>
+        <a:buChar char="q"/>           <!-- "q" Wingdings = ❑ carré -->
+
+    Idempotent : skip si buChar déjà présent.
+    """
+    actions = []
+    target = None
+    for shape in slide.shapes:
+        if shape.name == shape_name and shape.has_text_frame:
+            target = shape
+            break
+    if target is None:
+        return actions
+
+    A_NS = f"{{{NS_A}}}"
+    txBody = target.text_frame._txBody
+    patched = 0
+    for p in txBody.findall(f"{A_NS}p"):
+        pPr = p.find(f"{A_NS}pPr")
+        if pPr is None:
+            continue
+        if pPr.find(f"{A_NS}buChar") is not None:
+            continue
+        # Ordre OOXML : buClr, buSzPct, buFont, buChar (après les paragraph props).
+        buClr = pPr.find(f"{A_NS}buClr")
+        insert_idx = list(pPr).index(buClr) + 1 if buClr is not None else len(pPr)
+
+        buFont = etree.Element(f"{A_NS}buFont")
+        buFont.set("typeface", "Wingdings")
+        buFont.set("pitchFamily", "2")
+        buFont.set("charset", "2")
+        pPr.insert(insert_idx, buFont)
+
+        buChar = etree.Element(f"{A_NS}buChar")
+        buChar.set("char", "q")
+        pPr.insert(insert_idx + 1, buChar)
+        patched += 1
+
+    if patched:
+        actions.append(f"inline-square-bullets:{patched}p")
+    return actions
+
+
 # ---------- Merci slide reposition (commercial-closing slide 0) ----------
 
 def reposition_merci_slide(slide: Slide) -> list[str]:
@@ -334,6 +390,9 @@ def patch_analysis_block():
     """analysis-block.pptx (15 slides) :
        - slides 0, 1, 3..14 (Evaluation / Questions / Q1..Q10 / Remarques / Souhaits) :
          bandeau + logo.
+       - slide 0 (Evaluation de la formation) : embed Wingdings square bullet
+         inline dans `Rectangle 3` (cf. feedback Inès 20/05, slide 4 du livrable).
+         L'héritage layout est perdu en cross-PPTX clone.
        - slide 2 (Évaluation globale de l'action) : AUCUN bandeau — slide titre
          de section avec colibri central, notre bandeau y est parasite
          (cf. feedback Inès 20/05, point slide 6 du livrable client).
@@ -363,6 +422,8 @@ def patch_analysis_block():
                     actions.append(f"removed:{name}")
         else:
             actions.extend(apply_bandeau(slide, with_logo=True))
+        if idx == 0:
+            actions.extend(force_inline_square_bullets(slide))
         if idx in SLIDES_TITLE_LEFT:
             font_sz = 2400  # 24pt
             if force_title_left_align(slide, font_size=font_sz):
