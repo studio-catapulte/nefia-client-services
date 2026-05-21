@@ -332,11 +332,11 @@ def reposition_merci_slide(slide: Slide) -> list[str]:
 
 def patch_analysis_block():
     """analysis-block.pptx (15 slides) :
-       - slides 3..14 (Q1..Q10 + Remarques + Souhaits) : bandeau + logo.
-       - slides 0, 1, 2 (Evaluation / Questions fiche / Évaluation globale) :
-         AUCUN bandeau — ce sont des slides titre de section, branding Pic
-         déjà présent (colibri central etc.), notre bandeau y serait parasite
-         (cf. feedback Inès 20/05).
+       - slides 0, 1, 3..14 (Evaluation / Questions / Q1..Q10 / Remarques / Souhaits) :
+         bandeau + logo.
+       - slide 2 (Évaluation globale de l'action) : AUCUN bandeau — slide titre
+         de section avec colibri central, notre bandeau y est parasite
+         (cf. feedback Inès 20/05, point slide 6 du livrable client).
        - slides 13, 14 : force titre left-align (Remarques / Souhaits).
        - slide Q4 (idx 6) : vire le `ZoneTexte 5` pré-baked (artefact CAMARINES
          hérité) qui forçait l'inject à reposer les commentaires sur une zone
@@ -347,7 +347,7 @@ def patch_analysis_block():
     prs = Presentation(str(ANALYSIS_TPL))
 
     # Indices 0-based : 0=Evaluation, 1=Questions, 2=Globale, 3..12=Q1..Q10, 13=Remarques, 14=Souhaits
-    SLIDES_NO_BANDEAU = {0, 1, 2}
+    SLIDES_NO_BANDEAU = {2}
     SLIDES_TITLE_LEFT = {13, 14}
 
     # Slide Q4 (idx 6) : drop `ZoneTexte 5` pré-baked → inject_slides recréera
@@ -396,21 +396,25 @@ def patch_intro_block():
 
 def patch_commercial_closing():
     """commercial-closing.pptx (6 slides) :
-       - AUCUN bandeau sur les 6 slides — ce sont des slides marketing Pic
-         préexistantes (équipe, certifs, catalogue, contact, 2 murs de logos
-         partenaires), branding déjà natif, notre bandeau y est parasite
-         (cf. feedback Inès 20/05).
+       - slides 0-3 (Merci / Certifiantes / Courte durée / Encore question) :
+         bandeau + logo top-right.
+       - slides 4, 5 (murs de logos partenaires) : AUCUN bandeau — slides
+         saturées en logos partenaires, notre barre bleue passait par-dessus
+         (cf. feedback Inès 20/05, points "2 dernières slides de pub").
        - slide 0 (Merci) : reposition selon layout golden.
-       - Drop d'éventuels bandeaux laissés par une version antérieure.
     """
     print(f"\n=== Patch {CLOSING_TPL.name} ===")
     prs = Presentation(str(CLOSING_TPL))
     bandeau_names = (LINE_NAME, *[r["name"] for r in RECTS], LOGO_NAME)
+    SLIDES_NO_BANDEAU = {4, 5}
     for idx, slide in enumerate(prs.slides):
         actions = []
-        for name in bandeau_names:
-            if _remove_shape_named(slide, name):
-                actions.append(f"removed:{name}")
+        if idx in SLIDES_NO_BANDEAU:
+            for name in bandeau_names:
+                if _remove_shape_named(slide, name):
+                    actions.append(f"removed:{name}")
+        else:
+            actions.extend(apply_bandeau(slide, with_logo=True))
         if idx == 0:
             moves = reposition_merci_slide(slide)
             actions.extend(moves)
