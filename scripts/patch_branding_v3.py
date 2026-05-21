@@ -332,10 +332,12 @@ def reposition_merci_slide(slide: Slide) -> list[str]:
 
 def patch_analysis_block():
     """analysis-block.pptx (15 slides) :
-       - slides 0..14 : bandeau + logo (sauf slide 2 'Globale' = section transition,
-         pas de logo top-right pour matcher le pattern PIC).
-       - slides 0, 1, 13, 14 : force titre left-align (Evaluation/Questions/Remarques/Souhaits)
-       - slide 2 (Globale) : titre reste centré.
+       - slides 3..14 (Q1..Q10 + Remarques + Souhaits) : bandeau + logo.
+       - slides 0, 1, 2 (Evaluation / Questions fiche / Évaluation globale) :
+         AUCUN bandeau — ce sont des slides titre de section, branding Pic
+         déjà présent (colibri central etc.), notre bandeau y serait parasite
+         (cf. feedback Inès 20/05).
+       - slides 13, 14 : force titre left-align (Remarques / Souhaits).
        - slide Q4 (idx 6) : vire le `ZoneTexte 5` pré-baked (artefact CAMARINES
          hérité) qui forçait l'inject à reposer les commentaires sur une zone
          étroite et décalée vs les autres Q. Sans ce shape, inject_slides crée
@@ -345,31 +347,30 @@ def patch_analysis_block():
     prs = Presentation(str(ANALYSIS_TPL))
 
     # Indices 0-based : 0=Evaluation, 1=Questions, 2=Globale, 3..12=Q1..Q10, 13=Remarques, 14=Souhaits
-    SLIDE_GLOBALE = 2
-    SLIDES_TITLE_LEFT = {0, 1, 13, 14}
-
-    # Slide 1 (Questions) : titre dans TEXT_BOX 'ZoneTexte 3' (pas placeholder)
-    SLIDE_QUESTIONS = 1
-    QUESTIONS_TITLE_NAME = "ZoneTexte 3"
+    SLIDES_NO_BANDEAU = {0, 1, 2}
+    SLIDES_TITLE_LEFT = {13, 14}
 
     # Slide Q4 (idx 6) : drop `ZoneTexte 5` pré-baked → inject_slides recréera
     # une textbox commentaires standard comme pour les autres Q.
     SLIDE_Q4 = 6
 
     for idx, slide in enumerate(prs.slides):
-        actions = apply_bandeau(slide, with_logo=True)
+        actions = []
+        if idx in SLIDES_NO_BANDEAU:
+            # Drop d'éventuels bandeaux laissés par une version antérieure.
+            for name in (LINE_NAME, *[r["name"] for r in RECTS], LOGO_NAME):
+                if _remove_shape_named(slide, name):
+                    actions.append(f"removed:{name}")
+        else:
+            actions.extend(apply_bandeau(slide, with_logo=True))
         if idx in SLIDES_TITLE_LEFT:
             font_sz = 2400  # 24pt
             if force_title_left_align(slide, font_size=font_sz):
                 actions.append(f"title-left+Calibri{font_sz//100}pt")
-        if idx == SLIDE_QUESTIONS:
-            if force_title_left_align(slide, font_size=2400,
-                                       shape_name=QUESTIONS_TITLE_NAME):
-                actions.append("questions-title-left+Calibri24pt")
         if idx == SLIDE_Q4:
             if _remove_shape_named(slide, "ZoneTexte 5"):
                 actions.append("dropped-Q4-baked-commentaires-box")
-        print(f"  slide {idx}: {', '.join(actions)}")
+        print(f"  slide {idx}: {', '.join(actions) or '(noop)'}")
 
     prs.save(str(ANALYSIS_TPL))
     print(f"  → saved")
@@ -378,14 +379,16 @@ def patch_analysis_block():
 def patch_intro_block():
     """intro-block.pptx (1 slide sommaire) :
        - bandeau + logo
-       - titre 'Sommaire' left-align + Calibri 28pt bold
+       - titre 'Sommaire' left-align + Calibri 24pt bold (24pt depuis le
+         feedback Inès 20/05 — 28pt cassait la cohérence visuelle avec les
+         autres titres de section).
     """
     print(f"\n=== Patch {INTRO_TPL.name} ===")
     prs = Presentation(str(INTRO_TPL))
     slide = prs.slides[0]
     actions = apply_bandeau(slide, with_logo=True)
-    if force_title_left_align(slide, font_size=2800):
-        actions.append("title-left+Calibri28pt")
+    if force_title_left_align(slide, font_size=2400):
+        actions.append("title-left+Calibri24pt")
     print(f"  slide 0: {', '.join(actions)}")
     prs.save(str(INTRO_TPL))
     print(f"  → saved")
@@ -393,21 +396,25 @@ def patch_intro_block():
 
 def patch_commercial_closing():
     """commercial-closing.pptx (6 slides) :
-       - slides 0-3 (Merci / Certifiantes / Courte durée / Encore question) :
-         bandeau + logo top-right.
-       - slides 4-5 (murs de logos partenaires) : juste bandeau latéral, pas de
-         logo top-right (chevaucherait les logos partenaires).
+       - AUCUN bandeau sur les 6 slides — ce sont des slides marketing Pic
+         préexistantes (équipe, certifs, catalogue, contact, 2 murs de logos
+         partenaires), branding déjà natif, notre bandeau y est parasite
+         (cf. feedback Inès 20/05).
        - slide 0 (Merci) : reposition selon layout golden.
+       - Drop d'éventuels bandeaux laissés par une version antérieure.
     """
     print(f"\n=== Patch {CLOSING_TPL.name} ===")
     prs = Presentation(str(CLOSING_TPL))
+    bandeau_names = (LINE_NAME, *[r["name"] for r in RECTS], LOGO_NAME)
     for idx, slide in enumerate(prs.slides):
-        with_logo = idx <= 3
-        actions = apply_bandeau(slide, with_logo=with_logo)
+        actions = []
+        for name in bandeau_names:
+            if _remove_shape_named(slide, name):
+                actions.append(f"removed:{name}")
         if idx == 0:
             moves = reposition_merci_slide(slide)
             actions.extend(moves)
-        print(f"  slide {idx} (with_logo={with_logo}): {', '.join(actions)}")
+        print(f"  slide {idx}: {', '.join(actions) or '(noop)'}")
     prs.save(str(CLOSING_TPL))
     print(f"  → saved")
 
