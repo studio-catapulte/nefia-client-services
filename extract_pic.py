@@ -36,17 +36,63 @@ Q_WORDINGS = [
 # Modalités exactes (telles qu'imprimées sur le questionnaire PIC)
 RESPONSES_VALID = ["Très satisfait", "Satisfait", "Déçu", "Très déçu"]
 
-STRUCTURATION_PROMPT = f"""Tu reçois le contenu OCR d'un ou plusieurs questionnaires de satisfaction Pic Formation. Chaque questionnaire correspond à UN participant (le prénom est en haut). Les questionnaires sont remplis à la main, les cases cochées sont indiquées par des symboles comme ☒, ✗, X, x, [x], ou un noircissement de la case.
+STRUCTURATION_PROMPT = f"""Tu reçois le contenu OCR d'un ou plusieurs questionnaires de satisfaction "BILAN A CHAUD" Pic Formation. Chaque questionnaire correspond à UN participant (un seul scan = un seul participant). Les questionnaires sont remplis à la main, les cases cochées sont indiquées par des symboles comme ☒, ✗, X, x, [x], ou un noircissement de la case.
 
-Format du questionnaire Pic Formation :
-- 10 questions standardisées (toujours dans cet ordre, parfois numérotées 1-10 sur le scan)
-- Pour chaque question, 4 modalités possibles : "Très satisfait", "Satisfait", "Déçu", "Très déçu"
-- Pour chaque question, une zone "Mes commentaires" optionnelle (souvent vide ou avec quelques mots manuscrits)
-- En fin de questionnaire :
-  - "Vos remarques et suggestions" (texte libre, optionnel)
-  - "Vos souhaits pour d'autres formations" (texte libre, optionnel)
+## Géométrie EXACTE du formulaire (à connaître pour bien router le texte)
 
-Les 10 questions exactes sont :
+Le formulaire papier a UNE seule page par participant, structurée ainsi (du haut vers le bas) :
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Bandeau : "BILAN A CHAUD"  Formation: …  ESAT/Lieu: …  Formateur: …    │
+│                                                                          │
+│  NOM / Prénom : __________________________                               │
+│                                                                          │
+│  ┌──────────────────────────────────────┬───┬───┬───┬───┬─────────────┐ │
+│  │ #  Question                          │TS │ S │ D │TD │Mes commentaires│
+│  ├──────────────────────────────────────┼───┼───┼───┼───┼─────────────┤ │
+│  │ 1. Cette formation m'a apporté…      │ X │   │   │   │  (souvent vide)│
+│  │ 2. Ces compétences vont m'aider…     │ X │   │   │   │              │ │
+│  │ … (10 lignes au total)               │   │   │   │   │              │ │
+│  │ 10. En conclusion, vous êtes :       │ ☺ │ ☺ │ ☹ │ ☹ │              │ │
+│  └──────────────────────────────────────┴───┴───┴───┴───┴─────────────┘ │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │ Commentaires : (ce que vous avez bien aimé / ou pas aimé…)          │ │
+│  │ ____________________________________________________________________│ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  Vos souhaits pour d'autres formations : ___________________________     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Il y a donc TROIS zones de texte libre, et il est CRITIQUE de ne pas les confondre :
+
+1. **Colonne "Mes commentaires"** (à DROITE de la grille des 10 questions, dans le tableau)
+   - Chaque ligne de cette colonne est alignée avec UNE question précise (Q1 sur la 1ʳᵉ ligne, …, Q10 sur la 10ᵉ)
+   - Contenu typique : très court, souvent 1 à 10 mots ("Trop court", "Temps", "rien", "vidéo concerne plus")
+   - Le plus souvent VIDE pour la plupart des questions, voire pour TOUT le tableau
+   - → va dans `commentaires_par_question["QN"]`
+
+2. **Boîte "Commentaires : (ce que vous avez bien aimé / ou pas aimé…)"** (SOUS le tableau, sur 1-3 lignes manuscrites)
+   - C'est UN SEUL bloc de texte général sur l'ensemble de la formation
+   - Contenu typique : phrase(s) complète(s), souvent plus long que les commentaires colonne
+   - → va dans `remarque_libre`
+
+3. **Ligne "Vos souhaits pour d'autres formations :"** (TOUT EN BAS, sur 1 ligne)
+   - Le texte qui suit le `:` jusqu'à la fin de la page
+   - → va dans `souhait_autre_formation`
+
+## Règles ANTI-CONFUSION (les bugs déjà observés)
+
+- Le bandeau "Mes commentaires" (colonne) et le bandeau "Commentaires :" (boîte du bas) se ressemblent. **Ne JAMAIS** placer dans `commentaires_par_question` un texte qui se trouve sous la grille (= sous la ligne Q10). Tout ce qui est sous la grille appartient à `remarque_libre` ou `souhait_autre_formation`, JAMAIS à un commentaire par question.
+- Si la colonne "Mes commentaires" est entièrement vide, `commentaires_par_question` doit être un objet **vide** ({{}}) — NE PAS aller chercher du texte ailleurs sur la page pour remplir Q1.
+- Le texte de la boîte "Commentaires" du bas ne doit JAMAIS être splitté en deux entre `remarque_libre` et un commentaire par question. C'est un bloc indivisible.
+- Le texte qui suit "Vos souhaits pour d'autres formations :" doit aller UNIQUEMENT dans `souhait_autre_formation`, jamais dans `remarque_libre`.
+- En cas de doute sur le routage : par défaut → `remarque_libre`. Mieux vaut un remarque_libre trop riche qu'un commentaire fantôme sur Q1.
+
+## Les 10 questions (wording exact, dans cet ordre)
+
 1. Cette formation m'a apporté de nouvelles compétences et connaissances
 2. Ces compétences vont m'aider dans mon travail
 3. L'ambiance du groupe était bonne
@@ -58,40 +104,58 @@ Les 10 questions exactes sont :
 9. Les jeux & exercices pratiques m'ont aidé à bien comprendre
 10. En conclusion, vous êtes :
 
-Extrais TOUS les questionnaires présents dans le contenu OCR, dans l'ordre où ils apparaissent. Retourne UNIQUEMENT un JSON valide (sans markdown), au format suivant :
+## Format de sortie (JSON strict, pas de markdown)
 
 {{
   "participants": [
     {{
-      "prenom": "Prénom du participant tel qu'écrit en haut du questionnaire",
+      "prenom": "Romain",
       "reponses": {{
-        "Q1": "Très satisfait",
-        "Q2": "Satisfait",
-        "Q3": "Très satisfait",
-        "Q4": "Satisfait",
-        "Q5": "Très satisfait",
-        "Q6": "Très satisfait",
-        "Q7": "Satisfait",
-        "Q8": "Très satisfait",
-        "Q9": "Très satisfait",
+        "Q1": "Très satisfait", "Q2": "Satisfait", "Q3": "Très satisfait",
+        "Q4": "Satisfait", "Q5": "Très satisfait", "Q6": "Très satisfait",
+        "Q7": "Satisfait", "Q8": "Très satisfait", "Q9": "Très satisfait",
         "Q10": "Très satisfait"
       }},
       "commentaires_par_question": {{
-        "Q1": "Texte du commentaire si présent, sinon omettre la clé",
         "Q5": "Trop court"
       }},
-      "remarque_libre": "Contenu de la zone 'Vos remarques et suggestions' si rempli, sinon chaîne vide",
-      "souhait_autre_formation": "Contenu de la zone 'Vos souhaits pour d'autres formations' si rempli, sinon chaîne vide"
+      "remarque_libre": "J'ai aimé la pratique sur le site de chantier.",
+      "souhait_autre_formation": "Gestion du stress"
     }}
   ]
 }}
 
-Règles strictes :
-- Les valeurs de "reponses" doivent être EXACTEMENT l'une de : {RESPONSES_VALID!r} ou la chaîne "Non renseigné" si la case n'est pas cochée ou ambiguë.
-- Les clés "Q1" à "Q10" doivent toutes être présentes dans "reponses".
-- N'invente pas de commentaires : si la zone est vide ou illisible, omet la clé pour cette question (ne mets pas "" non plus).
-- Préserve l'orthographe et la ponctuation manuscrites dans les commentaires (même les fautes — c'est le mot du participant).
-- Pour le prénom : si illisible ou absent, mets "Anonyme N" où N est l'index (1, 2, 3…) du questionnaire.
+## Règles de format
+
+### `prenom`
+- Le champ "NOM / Prénom :" contient typiquement DEUX mots dans cet ordre : NOM puis Prénom. Exemple : "LECLERC ROMAIN" → NOM="LECLERC", Prénom="ROMAIN".
+- Extrais SEULEMENT le prénom (le 2ᵉ mot). Pas le nom de famille.
+- Normalise en Title Case (1ʳᵉ lettre majuscule, reste minuscules) : "ROMAIN" → "Romain", "MATHIOS" → "Mathios".
+- Si un seul mot est lisible, utilise-le comme prénom.
+- Si rien n'est lisible, mets "Anonyme N" où N est l'index (1, 2, 3…) du questionnaire dans le PDF.
+- N'invente JAMAIS un prénom — préfère "Anonyme N" si tu n'es pas sûr.
+
+### `reponses`
+- Valeurs autorisées (exactes) : {RESPONSES_VALID!r} ou "Non renseigné" si la case n'est pas cochée ou ambiguë.
+- Les 10 clés "Q1" à "Q10" doivent TOUTES être présentes.
+- Pour Q10 ("En conclusion"), l'émoticône entourée détermine la réponse : 😊 vert = "Très satisfait", 🙂 jaune = "Satisfait", ☹️ orange = "Déçu", 😠 rouge = "Très déçu".
+
+### `commentaires_par_question`
+- Clé `QN` présente UNIQUEMENT si la cellule "Mes commentaires" de la ligne N de la grille contient du texte manuscrit lisible.
+- Si la colonne entière est vide → objet vide `{{}}`. NE PAS y mettre du texte qui vient d'ailleurs.
+- Préserve l'orthographe et la ponctuation manuscrites (même les fautes — c'est la parole du participant).
+- N'invente JAMAIS de commentaire. Si la cellule est vide ou illisible, omet la clé (pas de chaîne vide).
+
+### `remarque_libre`
+- Contenu de la boîte "Commentaires : (ce que vous avez bien aimé / ou pas aimé…)" sous la grille.
+- Chaîne vide "" si la boîte est vide.
+- Préserve les fautes manuscrites.
+
+### `souhait_autre_formation`
+- Contenu de la ligne "Vos souhaits pour d'autres formations :" tout en bas.
+- Chaîne vide "" si rien après les deux points.
+
+Extrais TOUS les questionnaires présents dans le contenu OCR, dans l'ordre où ils apparaissent.
 
 Contenu OCR :
 """
