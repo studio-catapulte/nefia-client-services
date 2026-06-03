@@ -55,6 +55,7 @@ Le formulaire papier a UNE seule page par participant, structurée ainsi (du hau
 │  │ 2. Ces compétences vont m'aider…     │ X │   │   │   │              │ │
 │  │ … (10 lignes au total)               │   │   │   │   │              │ │
 │  │ 10. En conclusion, vous êtes :       │ ☺ │ ☺ │ ☹ │ ☹ │              │ │
+│  │  (croix OU émoticône cerclée acceptées — voir règle Q10 plus bas)    │ │
 │  └──────────────────────────────────────┴───┴───┴───┴───┴─────────────┘ │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────────┐ │
@@ -138,7 +139,11 @@ Il y a donc TROIS zones de texte libre, et il est CRITIQUE de ne pas les confond
 ### `reponses`
 - Valeurs autorisées (exactes) : {RESPONSES_VALID!r} ou "Non renseigné" si la case n'est pas cochée ou ambiguë.
 - Les 10 clés "Q1" à "Q10" doivent TOUTES être présentes.
-- Pour Q10 ("En conclusion"), l'émoticône entourée détermine la réponse : 😊 vert = "Très satisfait", 🙂 jaune = "Satisfait", ☹️ orange = "Déçu", 😠 rouge = "Très déçu".
+- Pour Q10 ("En conclusion, vous êtes :") le marquage est hétérogène — accepter LES DEUX formats équivalents :
+  (a) Émoticône entourée (cerclage manuscrit autour du smiley sous une colonne) : 😊 vert (col TS) = "Très satisfait", 🙂 jaune (col S) = "Satisfait", ☹️ orange (col D) = "Déçu", 😠 rouge (col TD) = "Très déçu".
+  (b) Croix ou marque (X, ✗, /, \\, +, trait) dans une cellule de la ligne Q10 au-dessus d'une émoticône — fonctionne EXACTEMENT comme Q1-Q9, la colonne cochée donne la réponse (1ʳᵉ col = "Très satisfait", 2ᵉ = "Satisfait", 3ᵉ = "Déçu", 4ᵉ = "Très déçu").
+  Important : (a) et (b) sont équivalents et fréquents — ne PAS exiger un cerclage si une croix est posée. Une marque dans la cellule SUFFIT, même si l'émoticône n'est pas entourée.
+  "Non renseigné" UNIQUEMENT si la ligne Q10 n'a aucune croix ET aucune émoticône cerclée.
 
 ### `commentaires_par_question`
 - Clé `QN` présente UNIQUEMENT si la cellule "Mes commentaires" de la ligne N de la grille contient du texte manuscrit lisible.
