@@ -66,7 +66,13 @@ logger = get_logger()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
-app = FastAPI(title="Nefia Questionnaire Processor", version="2.4.9")
+app = FastAPI(
+    title="Nefia Questionnaire Processor",
+    version="2.4.9",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.state.limiter = limiter
 
 
